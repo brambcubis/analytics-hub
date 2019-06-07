@@ -662,8 +662,8 @@ if __name__ == '__main__':
     # Update the report suggestions
     #my_connection.removeReportSuggestions()
     # Update the mailto urls
-    my_connection.updateMailtoBody(assets='1')
-
+    #my_connection.updateMailtoBody(assets='1')
+    print(my_connection.store)
 
     ###################
     #### DEBUGGING ####
