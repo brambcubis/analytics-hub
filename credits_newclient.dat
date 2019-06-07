@@ -1,0 +1,6 @@
+base_url,https://daikineurope1.eu10.sapanalytics.cloud/hub/
+authorize_url,https://daikineurope1.authentication.eu10.hana.ondemand.com/oauth/authorize
+token_url,https://daikineurope1.authentication.eu10.hana.ondemand.com/oauth/token
+client_id,sb-3c7139c4-bf77-4ad7-8f8b-25507fe04715!b15819|client!b3650
+client_secret,YXjNDJFtvGRsWkBmxR631asousw=
+redirect_uri,https://localhost:8080/callback

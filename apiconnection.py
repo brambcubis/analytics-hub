@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Created on Mo Feb 25 2019
-LastModified on Mo Mar 04 2019
+LastModified on Fr Jun 07 2019
 
 @author: Bram Buysschaert
 
@@ -34,6 +34,14 @@ LastModified on Mo Mar 04 2019
     (.pushMailtoBody(), .draftMailtoBody())
 - Defining the .removeMailtoBody method (v0.1) and the relevant submethods
     (.pushMailtoBodyClear(), .draftMailtoBodyClear())
+
+07/06:
+- Including a method to refresh an existing token
+    (.refreshToken())
+- Updating the credits file for the new client
+- Updating and altering some of the original implementations for the field ids within the assets.
+    These have changed with the migration of the SAP Analytics Hub to the new tenant.
+- Changed the implementation of the .getLiveStore(), because it used an incorrect path within the API.
 """
 
 # Include custom modules
@@ -51,6 +59,7 @@ import sys
 # Set the logging
 
 import logging
+logging.basicConfig(filename='./example.log',level=logging.DEBUG)
 
 # Create extra functionality
 
@@ -89,17 +98,27 @@ class ConnectSacHub:
         self.readCred()
         self.readToken()
         try:
-            self.getClient()      # Create oauth client
-            # Test connection
-            if self.testClient():
-                print(f'\tConnection established with info from "{self.tokenFile}"')
-                pass
-            else:
-                raise ValueError('Token Expired')
+            try:
+                self.getClient()      # Create oauth client
+                # Test connection with token from the file
+                if self.testClient():
+                    print(f'\tConnection established with info from "{self.tokenFile}"')
+                    pass
+                else:
+                    raise ValueError('Token Expired')
+            except:
+                self.refreshToken()    # Refresh the token
+                # Test connection
+                if self.testClient():
+                    print(f'\tConnection established with refreshed token')
+                    self.writeToken()      # Write token out
+                else:
+                    raise ValueError('Refreshing of token failed')
         except:
-            self.newToken()      # Create new token
+            # Get a completely new token
+            self.newToken()        # Create new token
             self.writeToken()      # Write token out
-            self.getClient()      # Create oauth client
+            self.getClient()       # Create oauth client
             # Test connection
             if self.testClient():
                 print(f'\tConnection established with updated token')
@@ -110,7 +129,7 @@ class ConnectSacHub:
         timediff_token = datetime.datetime.utcfromtimestamp(self.token['expires_at']) - datetime.datetime.utcfromtimestamp(self.currentTime)
         print('\tToken expires in {:.2f}h'.format(timediff_token.seconds / 3600))
         # Get a new X-CSRF-Token
-        self.fetchXcsrf()
+        #self.fetchXcsrf()
 
     def updateNewReportLov(self, timeDiffMax = 14.):
         """
@@ -151,10 +170,12 @@ class ConnectSacHub:
         df = self.extractSuggestionsInfoStore() # Should have functionality for assets keyword!
         # Loop over the assets and update them
         for assetId in assets:
-            # Get the suggestions for the assetId
-            df_sug = self.makeReportSuggestions(df, assetId, nSuggestions)
-            # Push the suggestions to the store
-            self.pushReportSuggestions(df_sug, assetId)
+            # Catch and ignore blank values for the domain
+            if str(df.at[assetId, 'assetDomain']) != 'nan':
+                # Get the suggestions for the assetId
+                df_sug = self.makeReportSuggestions(df, assetId, nSuggestions)
+                # Push the suggestions to the store
+                self.pushReportSuggestions(df_sug, assetId)
 
     def removeReportSuggestions(self, assets='all'):
         """
@@ -196,6 +217,7 @@ class ConnectSacHub:
         # Some bookkeeping for the functionality
         if assets == 'all':
             assets = self.assetid
+            print(assets)
         elif type(assets) != 'list':
             assets = [assets]
             # Format everything to strings
@@ -215,6 +237,7 @@ class ConnectSacHub:
             # Some bookkeeping for the functionality
             if assets == 'all':
                 assets = self.assetid
+                print(assets)
             elif type(assets) != 'list':
                 assets = [assets]
                 # Format everything to strings
@@ -248,9 +271,23 @@ class ConnectSacHub:
         self.token['scope'] = [''] # Not explictly saved and likely not needed!
         self.token['expires_at'] = float(self.token['expires_at'])
 
-    def newToken(self):
+    def refreshToken(self):
         """
         Update the access token, because the token from the tokenFile has expired or is unreadable
+        Requires no effort from the user and should solve most of the issues with the token
+        """
+        # Get the client
+        self.client = OAuth2Session(client_id=self.cred['client_id'], redirect_uri=self.cred['redirect_uri'])
+        # Refresh the token with the refresh_token from the tokenFile
+        print(f'Refreshing the token with the refresh_token')
+        self.token = self.client.refresh_token(token_url=self.cred['token_url'],
+                                                refresh_token=self.token['refresh_token'],
+                                                client_id=self.cred['client_id'],
+                                                client_secret=self.cred['client_secret'])
+
+    def newToken(self):
+        """
+        Get a new access token, because the token from the tokenFile has expired or is unreadable
         Requires the user to go to the website, authorize the token and provide the response
         """
         self.client = OAuth2Session(client_id=self.cred['client_id'], redirect_uri=self.cred['redirect_uri'])
@@ -291,18 +328,39 @@ class ConnectSacHub:
             self.headers['x-csrf-token'] = self.xcsrf
             print('\tX-CSRF-Token updated')
 
-    def getLiveStore(self):
-        """Retrieve the information of your live assets in your SAC Hub store through a GET request"""
-        print('\tGETting *partial* information of your live store')
-        r = self.client.get(self.base + 'api/v1/asset/recent', headers=self.headers)
+    def getLiveStore(self, asset_limit=100):
+        """
+        Retrieve the information of your complete live store in your SAC Hub store through a POST request
+        You need to use a search statement, as there is no method available to access the complete live store directly
+        """
+        print(f'\tGetting (POST) information of your live store up to a limit of {asset_limit} assets')
+        # Body for the search statement -- give blank keywords
+        body = {"keywords": "",
+                "sortCriteria": "viewCount",
+                "sortDirection": "desc",
+                "page": 0,
+                "limit": asset_limit,
+                "showFacets": False,
+                "showAssets": True,
+                "showTags": False,
+                "selectedFacets": {},
+                "selectedFields": [ ],
+                "selectedTags": [ ]
+                }
+        # Perform the POST statement
+        r = self.client.post(self.base + 'api/v1/search/',
+                            headers = self.headers, json=body)
+        # Test the reply of the POST request
         if r.ok:
+            # Returns a tuple of facets and assets
+            store = r.json()['assets']
             # Create a dictionary for the store
             self.store = {}
-            for asset in r.json():
+            for asset in store:
                 self.store[str(asset['id'])] = asset
             self.assetid = self.store.keys()
         else:
-            print(f'Your GET request was unsuccessful with status code {r.status_code}')
+            print(f'Your POST request was unsuccessful with status code {r.status_code}')
 
     def getAssetStructure(self):
         """Retrieve the full field, lovfield and lov structure of the asset layout"""
@@ -383,10 +441,16 @@ class ConnectSacHub:
         print('\tExtracting information for reportSuggestions from live store')
         # Empty dataframe to store the information to
         df = pd.DataFrame(index=self.assetid, columns=['assetType', 'assetTitle', 'viewCount', 'assetDomain', 'draftId'])
-        # Get the id's for certain fields and lovs from the pre-loaded structure
-        id_title = str(self.structure['fields']['Title']['id'])
-        id_sugg = str(self.structure['fields']['Report Suggestions']['id'])
-        id_domain = str(self.structure['lovfields']['Domain']['id'])
+        # Get the id's for certain fields and lovs from the first id in the store
+        asset = self.store[list(self.assetid)[0]]
+        # Get the asset title from the fields
+        for id, field in asset['fields'].items():
+            if field['title'] == 'Title':
+                id_title = str(id)
+        # Get the asset domain from the lovs
+        for id, lovfield in asset['lovFields'].items():
+            if lovfield['title'] == 'Domain':
+                id_domain = str(id)
         # Loop over the assets in the store
         for assetId, asset in self.store.items():
             # Create dictionary with the information
@@ -431,6 +495,11 @@ class ConnectSacHub:
         id_sugg = "10"
         # Get the information of the current live asset (GET statement or lookup in self.store)
         asset = self.store[str(assetId)]
+        # Get the asset title
+        for id, field in asset['fields'].items():
+            if field['title'] == 'Title':
+                asset_title = field['values'][0]['value']
+                id_title = str(id)
         # Create the "values" for the suggestions
         values = []
         # Loop over the suggestions and append the suggestions
@@ -447,7 +516,7 @@ class ConnectSacHub:
                 "assetId":int(assetId),
                 "type":asset['type'],
                 "fields":{
-                    "1": {"values":[{"value":asset['fields']["1"]['values'][0]['value']}]},
+                    id_title: {"values":[{"value":asset_title}]},
                     id_sugg: {
                         "values": values}
                         }
@@ -461,6 +530,11 @@ class ConnectSacHub:
         id_sugg = "10"
         # Get the information of the current live asset (GET statement or lookup in self.store)
         asset = self.store[str(assetId)]
+        # Get the asset title
+        for id, field in asset['fields'].items():
+            if field['title'] == 'Title':
+                asset_title = field['values'][0]['value']
+                id_title = str(id)
         # Create an empty "values" list for the suggestions
         values = []
         # Format the body with the minimal requirements of the current live asset
@@ -470,8 +544,8 @@ class ConnectSacHub:
                 "assetId":int(assetId),
                 "type":asset['type'],
                 "fields":{
-                    "1": {"values":[{"value":asset['fields']["1"]['values'][0]['value']}]},
-                    "10": {
+                    id_title: {"values":[{"value":asset_title}]},
+                    id_sugg: {
                         "values": values}
                         }
                 }
@@ -564,7 +638,11 @@ class ConnectSacHub:
         else:
             print(f'\t\tUnsuccessful POST to get asset {assetId} info with status_code {r.status_code}')
         # Get the asset title
-        asset_title = asset['fields']["1"]['values'][0]['value']
+        for id, field in asset['fields'].items():
+            if field['title'] == 'Title':
+                asset_title = field['values'][0]['value']
+                id_title = str(id)
+        #asset_title = asset['fields']["1"]['values'][0]['value']
         # Get the asset "Report Owner"
         for id, field in asset['fields'].items():
             if field['title'] == 'Report Owner':
@@ -592,13 +670,12 @@ class ConnectSacHub:
                    "url": url,
                    "type": "external"}})
         # Format the body with the minimal requirements of the current live asset
-        # 1 = Title (standard)
         # asset_title = (automatically retrieved)
         body = {"id":draftId,
                 "assetId":int(assetId),
                 "type":asset['type'],
                 "fields":{
-                    "1": {"values":[{"value":asset_title}]},
+                    id_title: {"values":[{"value":asset_title}]},
                     id_mailto: {
                         "values": values_new}
                         }
@@ -614,7 +691,12 @@ class ConnectSacHub:
         else:
             print(f'\t\tUnsuccessful POST to get asset {assetId} info with status_code {r.status_code}')
         # Get the asset title
-        asset_title = asset['fields']["1"]['values'][0]['value']
+        for id, field in asset['fields'].items():
+            if field['title'] == 'Title':
+                asset_title = field['values'][0]['value']
+                id_title = str(id)
+        # asset_title = asset['fields']["1"]['values'][0]['value']
+
         # Get the asset "Report Owner"
         for id, field in asset['fields'].items():
             if field['title'] == 'Report Owner':
@@ -637,13 +719,12 @@ class ConnectSacHub:
                    "url": url,
                    "type": "external"}})
         # Format the body with the minimal requirements of the current live asset
-        # 1 = Title (standard)
         # asset_title = (automatically retrieved)
         body = {"id":draftId,
                 "assetId":int(assetId),
                 "type":asset['type'],
                 "fields":{
-                    "1": {"values":[{"value":asset_title}]},
+                    id_title: {"values":[{"value":asset_title}]},
                     id_mailto: {
                         "values": values_new}
                         }
@@ -651,19 +732,19 @@ class ConnectSacHub:
         return body
 
 if __name__ == '__main__':
-    # Call the class to generate a token
-    my_connection = ConnectSacHub('./credits.dat', './token.dat')
-    # Connect the class to the SAC Hub
+    ## Call the class to generate a token
+    my_connection = ConnectSacHub('./credits_newclient.dat', './token.dat')
+    ## Connect the class to the SAC Hub
     my_connection.connect()
-    # Get a copy of the live Store
+    ## Get a copy of the live Store
     my_connection.getLiveStore()
-    # Understand the structure of the store
-    my_connection.getAssetStructure()
-    # Update the report suggestions
+    ## Understand the structure of the store
+    #my_connection.getAssetStructure()
+    ## Update the report suggestions
     #my_connection.removeReportSuggestions()
-    # Update the mailto urls
+    ## Update the mailto urls
     #my_connection.updateMailtoBody(assets='1')
-    print(my_connection.store)
+    print(list(my_connection.assetid)[0])
 
     ###################
     #### DEBUGGING ####
